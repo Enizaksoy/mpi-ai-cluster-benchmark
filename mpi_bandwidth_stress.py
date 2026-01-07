@@ -247,15 +247,50 @@ tail -50 /tmp/mpi_stress.log 2>/dev/null || echo "No log file found"
     output, code = run_ssh_script(log_script, "Get log")
     print(output)
 
+def show_servers():
+    """Show MPI process status on all servers"""
+    print("MPI Process Status - All Servers")
+    print("=" * 60)
+
+    # Check from master which servers are running MPI
+    servers_script = '''
+echo "Checking all 8 RDMA nodes..."
+echo ""
+
+# RDMA IPs from hostfile
+for rdma_ip in $(cat /home/versa/hostfile_rdma | awk "{print \\$1}"); do
+    # Get hostname and MPI process info via SSH
+    result=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 $rdma_ip "
+        hostname=\\$(hostname)
+        procs=\\$(ps aux | grep -E \\"osu_\\" | grep -v grep | wc -l)
+        cpu=\\$(ps aux | grep -E \\"osu_\\" | grep -v grep | awk \\"{sum+=\\\\\\$3} END {print sum}\\")
+        if [ -z \\"\\$cpu\\" ]; then cpu=0; fi
+        echo \\"\\$hostname|\\$procs|\\$cpu\\"
+    " 2>/dev/null)
+
+    if [ -n "$result" ]; then
+        hostname=$(echo $result | cut -d"|" -f1)
+        procs=$(echo $result | cut -d"|" -f2)
+        cpu=$(echo $result | cut -d"|" -f3)
+        printf "%-18s %-15s Procs: %s  CPU: %s%%\\n" "$rdma_ip" "$hostname" "$procs" "$cpu"
+    else
+        printf "%-18s %-15s %s\\n" "$rdma_ip" "---" "Connection failed"
+    fi
+done
+'''
+    output, code = run_ssh_script(servers_script, "Get server status")
+    print(output)
+
 def main():
     if len(sys.argv) < 2:
         print("MPI Bandwidth Stress Test")
         print()
         print("Usage:")
-        print("  ./mpi_bandwidth_stress.py start   - Start continuous stress test")
-        print("  ./mpi_bandwidth_stress.py stop    - Stop stress test")
-        print("  ./mpi_bandwidth_stress.py status  - Check status")
-        print("  ./mpi_bandwidth_stress.py log     - Show recent log")
+        print("  ./mpi_bandwidth_stress.py start    - Start continuous stress test")
+        print("  ./mpi_bandwidth_stress.py stop     - Stop stress test")
+        print("  ./mpi_bandwidth_stress.py status   - Check status")
+        print("  ./mpi_bandwidth_stress.py servers  - Show per-server status")
+        print("  ./mpi_bandwidth_stress.py log      - Show recent log")
         print()
         print("This generates continuous high-bandwidth MPI traffic")
         print("similar to rdma_aggressive_sshpass.py but using MPI collectives.")
@@ -269,11 +304,13 @@ def main():
         stop_stress_test()
     elif command == "status":
         show_status()
+    elif command == "servers":
+        show_servers()
     elif command == "log":
         show_log()
     else:
         print(f"Unknown command: {command}")
-        print("Use: start, stop, status, or log")
+        print("Use: start, stop, status, servers, or log")
         sys.exit(1)
 
 if __name__ == "__main__":
