@@ -116,7 +116,7 @@ def run_ssh_script(script_content, description="SSH command"):
 def is_running():
     """Check if stress test is running - returns (bool, pid_list)"""
     script = '''
-pgrep -f "mpi_stress_test.sh" 2>/dev/null
+pgrep -x -f "/home/versa/mpi_stress_test.sh" 2>/dev/null || pgrep -f "^/bin/bash /home/versa/mpi_stress" 2>/dev/null
 '''
     output, code = run_ssh_script(script)
     pids = [p for p in output.split('\n') if p.strip().isdigit()]
