@@ -34,80 +34,93 @@ LOGFILE="/tmp/mpi_stress.log"
 export UCX_TLS=ud_verbs,self,sm
 export UCX_NET_DEVICES=all
 
-echo "Starting MPI Bandwidth Stress Test" | tee $LOGFILE
-echo "Time: $(date)" | tee -a $LOGFILE
-echo "========================================" | tee -a $LOGFILE
+echo "Starting MPI Bandwidth Stress Test" > $LOGFILE
+echo "Time: $(date)" >> $LOGFILE
+echo "========================================" >> $LOGFILE
 
 iteration=0
 while true; do
     iteration=$((iteration + 1))
-    echo "" | tee -a $LOGFILE
-    echo "=== Iteration $iteration - $(date) ===" | tee -a $LOGFILE
+    echo "" >> $LOGFILE
+    echo "=== Iteration $iteration - $(date) ===" >> $LOGFILE
 
     # Large message Allreduce - simulates gradient synchronization
-    echo "Running Allreduce 4MB (gradient sync simulation)..." | tee -a $LOGFILE
-    mpirun --hostfile $HOSTFILE -np 8 \\
-        -x UCX_TLS -x UCX_NET_DEVICES \\
-        --mca pml ucx --mca btl ^openib,tcp \\
-        --mca btl_openib_warn_no_device_params_found 0 \\
-        $OSU_PATH/osu_allreduce -m 4194304:4194304 -i 1000 2>&1 | tee -a $LOGFILE
+    echo "Allreduce 4MB x1000..." >> $LOGFILE
+    mpirun --hostfile $HOSTFILE -np 8 \
+        -x UCX_TLS -x UCX_NET_DEVICES \
+        --mca pml ucx --mca btl ^openib,tcp \
+        --mca btl_openib_warn_no_device_params_found 0 \
+        $OSU_PATH/osu_allreduce -m 4194304:4194304 -i 1000 >> $LOGFILE 2>&1
 
     # Alltoall - heavy all-to-all communication
-    echo "Running Alltoall 1MB (all-to-all exchange)..." | tee -a $LOGFILE
-    mpirun --hostfile $HOSTFILE -np 8 \\
-        -x UCX_TLS -x UCX_NET_DEVICES \\
-        --mca pml ucx --mca btl ^openib,tcp \\
-        --mca btl_openib_warn_no_device_params_found 0 \\
-        $OSU_PATH/osu_alltoall -m 1048576:1048576 -i 500 2>&1 | tee -a $LOGFILE
+    echo "Alltoall 1MB x500..." >> $LOGFILE
+    mpirun --hostfile $HOSTFILE -np 8 \
+        -x UCX_TLS -x UCX_NET_DEVICES \
+        --mca pml ucx --mca btl ^openib,tcp \
+        --mca btl_openib_warn_no_device_params_found 0 \
+        $OSU_PATH/osu_alltoall -m 1048576:1048576 -i 500 >> $LOGFILE 2>&1
 
     # Broadcast large data
-    echo "Running Broadcast 4MB (parameter distribution)..." | tee -a $LOGFILE
-    mpirun --hostfile $HOSTFILE -np 8 \\
-        -x UCX_TLS -x UCX_NET_DEVICES \\
-        --mca pml ucx --mca btl ^openib,tcp \\
-        --mca btl_openib_warn_no_device_params_found 0 \\
-        $OSU_PATH/osu_bcast -m 4194304:4194304 -i 1000 2>&1 | tee -a $LOGFILE
+    echo "Broadcast 4MB x1000..." >> $LOGFILE
+    mpirun --hostfile $HOSTFILE -np 8 \
+        -x UCX_TLS -x UCX_NET_DEVICES \
+        --mca pml ucx --mca btl ^openib,tcp \
+        --mca btl_openib_warn_no_device_params_found 0 \
+        $OSU_PATH/osu_bcast -m 4194304:4194304 -i 1000 >> $LOGFILE 2>&1
 
     # Allgather - gather from all nodes
-    echo "Running Allgather 2MB..." | tee -a $LOGFILE
-    mpirun --hostfile $HOSTFILE -np 8 \\
-        -x UCX_TLS -x UCX_NET_DEVICES \\
-        --mca pml ucx --mca btl ^openib,tcp \\
-        --mca btl_openib_warn_no_device_params_found 0 \\
-        $OSU_PATH/osu_allgather -m 2097152:2097152 -i 500 2>&1 | tee -a $LOGFILE
+    echo "Allgather 2MB x500..." >> $LOGFILE
+    mpirun --hostfile $HOSTFILE -np 8 \
+        -x UCX_TLS -x UCX_NET_DEVICES \
+        --mca pml ucx --mca btl ^openib,tcp \
+        --mca btl_openib_warn_no_device_params_found 0 \
+        $OSU_PATH/osu_allgather -m 2097152:2097152 -i 500 >> $LOGFILE 2>&1
 
-    # Multi-pair bandwidth test if available
-    if [ -f "$OSU_PATH/osu_mbw_mr" ]; then
-        echo "Running Multi-pair Bandwidth..." | tee -a $LOGFILE
-        mpirun --hostfile $HOSTFILE -np 8 \\
-            -x UCX_TLS -x UCX_NET_DEVICES \\
-            --mca pml ucx --mca btl ^openib,tcp \\
-            $OSU_PATH/osu_mbw_mr 2>&1 | tail -5 | tee -a $LOGFILE
-    fi
-
-    echo "Iteration $iteration complete" | tee -a $LOGFILE
+    echo "Iteration $iteration complete" >> $LOGFILE
 
     # Brief pause between iterations
     sleep 2
 done
 '''
 
-def ssh_command(cmd, timeout=30):
-    """Run SSH command on master server"""
-    full_cmd = f"sshpass -p '{PASSWORD}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 versa@{MASTER} \"{cmd}\""
+def run_ssh_script(script_content, description="SSH command"):
+    """Run SSH command using script file (more reliable)"""
+    script_path = "/tmp/mpi_ssh_cmd.sh"
+
+    # Write script file
+    with open(script_path, "w") as f:
+        f.write("#!/bin/bash\n")
+        f.write(f"ip={MASTER}\n")
+        f.write(f"sshpass -p '{PASSWORD}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 versa@$ip '\n")
+        f.write(script_content)
+        f.write("\n'\n")
+
+    # Fix line endings and make executable
+    subprocess.run(["sed", "-i", "s/\r$//", script_path], capture_output=True)
+    os.chmod(script_path, 0o755)
+
+    # Run script
     try:
         result = subprocess.run(
-            full_cmd,
-            shell=True,
+            [script_path],
             capture_output=True,
             text=True,
-            timeout=timeout
+            timeout=30
         )
-        return result.stdout + result.stderr
+        return result.stdout.strip(), result.returncode
     except subprocess.TimeoutExpired:
-        return "Command timed out"
+        return "Command timed out", 1
     except Exception as e:
-        return f"Error: {e}"
+        return f"Error: {e}", 1
+
+def is_running():
+    """Check if stress test is running - returns (bool, pid_list)"""
+    script = '''
+pgrep -f "mpi_stress_test.sh" 2>/dev/null
+'''
+    output, code = run_ssh_script(script)
+    pids = [p for p in output.split('\n') if p.strip().isdigit()]
+    return len(pids) > 0, pids
 
 def start_stress_test():
     """Start the MPI bandwidth stress test"""
@@ -116,43 +129,52 @@ def start_stress_test():
     print()
 
     # Check if already running
-    output = ssh_command("pgrep -f 'mpi_stress_test.sh' || echo 'not running'")
-    if "not running" not in output and output.strip():
-        print("Stress test already running!")
-        print(f"PIDs: {output.strip()}")
+    running, pids = is_running()
+    if running:
+        print(f"Stress test already running! PIDs: {', '.join(pids)}")
+        print("Use './mpi_bandwidth_stress.py stop' first to restart")
         return
 
     # Create the stress test script on the server
     print("Deploying stress test script...")
 
-    # Write script to temp file locally, then scp
+    # Write script to temp file locally
     with open("/tmp/mpi_stress_test.sh", "w") as f:
         f.write(MPI_STRESS_SCRIPT)
 
     # Fix line endings
-    subprocess.run(["sed", "-i", "s/\r$//", "/tmp/mpi_stress_test.sh"])
+    subprocess.run(["sed", "-i", "s/\r$//", "/tmp/mpi_stress_test.sh"], capture_output=True)
 
-    # Copy to server
-    scp_cmd = f"sshpass -p '{PASSWORD}' scp -o StrictHostKeyChecking=no /tmp/mpi_stress_test.sh versa@{MASTER}:/home/versa/"
-    subprocess.run(scp_cmd, shell=True)
+    # Copy to server using script
+    scp_script = f"""#!/bin/bash
+sshpass -p '{PASSWORD}' scp -o StrictHostKeyChecking=no /tmp/mpi_stress_test.sh versa@{MASTER}:/home/versa/
+"""
+    with open("/tmp/mpi_scp.sh", "w") as f:
+        f.write(scp_script)
+    subprocess.run(["sed", "-i", "s/\r$//", "/tmp/mpi_scp.sh"], capture_output=True)
+    os.chmod("/tmp/mpi_scp.sh", 0o755)
+    subprocess.run(["/tmp/mpi_scp.sh"], capture_output=True)
 
     # Make executable and start
-    ssh_command("chmod +x /home/versa/mpi_stress_test.sh")
+    start_script = '''
+chmod +x /home/versa/mpi_stress_test.sh
+rm -f /tmp/mpi_stress.log
+nohup /home/versa/mpi_stress_test.sh > /dev/null 2>&1 &
+sleep 3
+pgrep -f "mpi_stress_test.sh" || echo "FAILED"
+'''
+    output, code = run_ssh_script(start_script, "Start stress test")
 
-    print("Starting continuous MPI stress test...")
-    # Start in background with nohup
-    ssh_command("nohup /home/versa/mpi_stress_test.sh > /tmp/mpi_stress.log 2>&1 &", timeout=5)
-
-    time.sleep(3)
+    time.sleep(2)
 
     # Verify it started
-    output = ssh_command("pgrep -f 'mpi_stress_test.sh'")
-    if output.strip():
+    running, pids = is_running()
+    if running:
         print()
         print("=" * 50)
         print("MPI Bandwidth Stress Test STARTED")
         print("=" * 50)
-        print(f"PID: {output.strip()}")
+        print(f"PIDs: {', '.join(pids)}")
         print()
         print("Traffic pattern:")
         print("  - Allreduce 4MB x 1000 iterations")
@@ -169,57 +191,61 @@ def start_stress_test():
         print("  ./mpi_bandwidth_stress.py stop")
     else:
         print("Failed to start stress test")
-        print("Check log: ssh versa@192.168.11.152 'cat /tmp/mpi_stress.log'")
+        print("Check log: ./mpi_bandwidth_stress.py log")
 
 def stop_stress_test():
     """Stop all MPI stress tests"""
     print("Stopping MPI Bandwidth Stress Test...")
 
-    # Kill the stress test script
-    ssh_command("pkill -f 'mpi_stress_test.sh'")
+    stop_script = '''
+pkill -9 -f "mpi_stress_test.sh" 2>/dev/null
+pkill -9 -f "mpirun.*osu_" 2>/dev/null
+sleep 2
+pgrep -f "mpi_stress_test.sh" 2>/dev/null || echo "STOPPED"
+'''
+    output, code = run_ssh_script(stop_script, "Stop stress test")
 
-    # Kill any running mpirun processes from stress test
-    ssh_command("pkill -f 'mpirun.*osu_'")
-
-    time.sleep(2)
-
-    # Verify stopped
-    output = ssh_command("pgrep -f 'mpi_stress_test.sh' || echo 'stopped'")
-    if "stopped" in output:
+    if "STOPPED" in output:
         print("MPI Bandwidth Stress Test STOPPED")
     else:
         print("Warning: Some processes may still be running")
-        print(f"PIDs: {output}")
+        print(f"Output: {output}")
 
 def show_status():
     """Show status of stress test"""
     print("MPI Bandwidth Stress Test Status")
     print("=" * 50)
 
-    # Check if running
-    output = ssh_command("pgrep -f 'mpi_stress_test.sh'")
-    if output.strip():
-        print(f"Status: RUNNING (PID: {output.strip()})")
+    running, pids = is_running()
+
+    if running:
+        print(f"Status: RUNNING (PIDs: {', '.join(pids)})")
 
         # Show current MPI processes
-        mpi_procs = ssh_command("pgrep -f 'mpirun' | wc -l")
-        print(f"Active mpirun processes: {mpi_procs.strip()}")
-
-        # Show last few lines of log
-        print()
-        print("Recent activity:")
-        print("-" * 50)
-        log = ssh_command("tail -15 /tmp/mpi_stress.log")
-        print(log)
+        status_script = '''
+echo "Active mpirun: $(pgrep -f mpirun | wc -l)"
+echo ""
+echo "Recent activity:"
+echo "----------------------------------------"
+tail -20 /tmp/mpi_stress.log 2>/dev/null || echo "No log file"
+'''
+        output, code = run_ssh_script(status_script, "Get status")
+        print(output)
     else:
         print("Status: NOT RUNNING")
+        print()
+        print("Start with: ./mpi_bandwidth_stress.py start")
 
 def show_log():
     """Show live log output"""
     print("MPI Stress Test Log (last 50 lines):")
     print("=" * 50)
-    log = ssh_command("tail -50 /tmp/mpi_stress.log", timeout=10)
-    print(log)
+
+    log_script = '''
+tail -50 /tmp/mpi_stress.log 2>/dev/null || echo "No log file found"
+'''
+    output, code = run_ssh_script(log_script, "Get log")
+    print(output)
 
 def main():
     if len(sys.argv) < 2:
