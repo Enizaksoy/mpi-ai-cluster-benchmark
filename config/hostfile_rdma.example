@@ -1,0 +1,32 @@
+# MPI Hostfile for RDMA Cluster
+#
+# Format: <RDMA_IP> slots=<num_processes>
+#
+# IMPORTANT: Use RDMA IPs (192.168.250.x/251.x), NOT management IPs (192.168.11.x)
+# Using management IPs will route traffic over Ethernet instead of RDMA!
+#
+# To find your RDMA IP: ip addr show | grep '192.168.25'
+
+# Node 1 - RDMA IP on ens192 (VLAN 250)
+192.168.251.111 slots=1
+
+# Node 2 - RDMA IP on ens192 (VLAN 251)
+192.168.250.112 slots=1
+
+# Node 3 - RDMA IP on ens192 (VLAN 250)
+192.168.251.113 slots=1
+
+# Node 4 - RDMA IP on ens192 (VLAN 251)
+192.168.250.114 slots=1
+
+# Node 5 - RDMA IP on ens192 (VLAN 250)
+192.168.250.115 slots=1
+
+# Node 6 - RDMA IP on ens192 (VLAN 251)
+192.168.251.116 slots=1
+
+# Node 7 - RDMA IP on ens192 (VLAN 250)
+192.168.250.117 slots=1
+
+# Node 8 - RDMA IP on ens192 (VLAN 251)
+192.168.251.118 slots=1

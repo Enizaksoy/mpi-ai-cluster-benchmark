@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""
+MPI Test Controller - Run MPI collective operations continuously
+Similar to rdma_aggressive_sshpass.py but for MPI/AI training traffic
+
+Usage:
+    ./mpi_test_controller.py start    - Start continuous MPI tests
+    ./mpi_test_controller.py stop     - Stop all MPI tests
+    ./mpi_test_controller.py status   - Check if tests are running
+    ./mpi_test_controller.py once     - Run benchmark once and show results
+"""
+
+import subprocess
+import sys
+import time
+import os
+import signal
+from datetime import datetime, timedelta
+
+# Configuration
+MASTER_IP = "192.168.11.152"
+PASSWORD = "Versa@123!!"
+STATUS_FILE = "/tmp/mpi_test_status.txt"
+RESULTS_FILE = "/tmp/mpi_benchmark_results.txt"
+
+# MPI Configuration
+HOSTFILE = "~/hostfile_rdma"
+NUM_PROCESSES = 8
+OSU_PATH = "/usr/local/libexec/osu-micro-benchmarks/mpi/collective"
+
+# Test Configuration
+MESSAGE_SIZES = ["1024", "65536", "1048576", "4194304"]  # 1KB, 64KB, 1MB, 4MB
+ITERATIONS_PER_SIZE = 100
+LOOP_DELAY_SECONDS = 5  # Delay between test loops
+
+# ANSI colors
+GREEN = '\033[0;32m'
+YELLOW = '\033[1;33m'
+BLUE = '\033[0;34m'
+RED = '\033[0;31m'
+NC = '\033[0m'
+
+def print_header(text):
+    print(f"{BLUE}{'='*70}{NC}")
+    print(f"{BLUE}{text:^70}{NC}")
+    print(f"{BLUE}{'='*70}{NC}")
+
+def print_info(text):
+    print(f"{YELLOW}→ {text}{NC}")
+
+def print_success(text):
+    print(f"{GREEN}✓ {text}{NC}")
+
+def print_error(text):
+    print(f"{RED}✗ {text}{NC}")
+
+def ssh_exec(cmd, background=False, timeout=300):
+    """Execute command on master server via SSH"""
+    ssh_cmd = [
+        'sshpass', '-p', PASSWORD,
+        'ssh', '-o', 'StrictHostKeyChecking=no',
+        '-o', 'ConnectTimeout=10',
+        f'versa@{MASTER_IP}',
+        cmd
+    ]
+
+    if background:
+        process = subprocess.Popen(ssh_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return process
+    else:
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=timeout)
+        return result
+
+def run_benchmark_once():
+    """Run OSU benchmarks once and display results"""
+    print_header("OSU MPI BENCHMARKS - 8 NODES")
+    print()
+
+    benchmarks = [
+        ("osu_allreduce", "ALLREDUCE (Gradient Sync)", "1048576"),
+        ("osu_bcast", "BROADCAST (Model Weights)", "1048576"),
+        ("osu_allgather", "ALLGATHER (BatchNorm)", "131072"),
+        ("osu_reduce", "REDUCE (Loss Aggregation)", "1048576"),
+    ]
+
+    results = []
+
+    for bench_name, description, max_size in benchmarks:
+        print_info(f"Running {description}...")
+
+        cmd = f"""
+source ~/.mpi_rdma_env 2>/dev/null
+export UCX_TLS=ud_verbs,self,sm
+export UCX_NET_DEVICES=all
+mpirun --hostfile {HOSTFILE} -np {NUM_PROCESSES} \
+    -x UCX_TLS -x UCX_NET_DEVICES \
+    --mca pml ucx --mca btl ^openib,tcp \
+    --mca btl_openib_warn_no_device_params_found 0 \
+    {OSU_PATH}/{bench_name} -m {max_size} 2>&1 | grep -E "^[0-9]" | tail -5
+"""
+        try:
+            result = ssh_exec(cmd, timeout=120)
+            if result.returncode == 0 and result.stdout.strip():
+                print(f"  {description}:")
+                for line in result.stdout.strip().split('\n'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        size = int(parts[0])
+                        latency = float(parts[1])
+                        if size >= 1048576:
+                            print(f"    {size/1048576:.0f} MB: {latency:.2f} μs ({latency/1000:.2f} ms)")
+                        elif size >= 1024:
+                            print(f"    {size/1024:.0f} KB: {latency:.2f} μs")
+                        else:
+                            print(f"    {size} B: {latency:.2f} μs")
+                results.append((bench_name, result.stdout.strip()))
+            else:
+                print(f"  {RED}Failed{NC}")
+        except Exception as e:
+            print(f"  {RED}Error: {e}{NC}")
+
+        print()
+
+    # Save results
+    with open(RESULTS_FILE, 'w') as f:
+        f.write(f"# MPI Benchmark Results - {datetime.now().isoformat()}\n")
+        for name, output in results:
+            f.write(f"\n## {name}\n{output}\n")
+
+    print_success(f"Results saved to {RESULTS_FILE}")
+    return results
+
+def start_continuous_test():
+    """Start continuous MPI testing in background"""
+
+    if os.path.exists(STATUS_FILE):
+        print_error("MPI tests already running! Use 'stop' first.")
+        check_status()
+        return 1
+
+    print_header("STARTING CONTINUOUS MPI TESTS")
+    print()
+
+    print_info("Configuration:")
+    print(f"  Master: {MASTER_IP}")
+    print(f"  Nodes: {NUM_PROCESSES}")
+    print(f"  Message sizes: {', '.join(MESSAGE_SIZES)}")
+    print(f"  Iterations per size: {ITERATIONS_PER_SIZE}")
+    print(f"  Loop delay: {LOOP_DELAY_SECONDS}s")
+    print()
+
+    # Create the continuous test script on master
+    test_script = f"""
+#!/bin/bash
+# Continuous MPI Test Script - Generated by mpi_test_controller.py
+
+export UCX_TLS=ud_verbs,self,sm
+export UCX_NET_DEVICES=all
+export OMPI_MCA_pml=ucx
+export OMPI_MCA_btl="^openib,tcp"
+export OMPI_MCA_btl_openib_warn_no_device_params_found=0
+
+OSU_PATH="{OSU_PATH}"
+HOSTFILE="{HOSTFILE}"
+NP={NUM_PROCESSES}
+ITERATIONS={ITERATIONS_PER_SIZE}
+RESULTS_LOG="/tmp/mpi_continuous_results.log"
+
+echo "Starting continuous MPI tests at $(date)" > $RESULTS_LOG
+
+while true; do
+    echo "" >> $RESULTS_LOG
+    echo "=== Test cycle at $(date) ===" >> $RESULTS_LOG
+
+    for SIZE in {' '.join(MESSAGE_SIZES)}; do
+        echo "Running Allreduce size=$SIZE" >> $RESULTS_LOG
+        mpirun --hostfile $HOSTFILE -np $NP \\
+            -x UCX_TLS -x UCX_NET_DEVICES \\
+            --mca pml ucx --mca btl ^openib,tcp \\
+            --mca btl_openib_warn_no_device_params_found 0 \\
+            $OSU_PATH/osu_allreduce -m $SIZE:$SIZE -i $ITERATIONS 2>&1 | tail -1 >> $RESULTS_LOG
+    done
+
+    sleep {LOOP_DELAY_SECONDS}
+done
+"""
+
+    # Upload and start script
+    print_info("Creating test script on master...")
+
+    cmd = f"cat > /tmp/mpi_continuous_test.sh << 'ENDSCRIPT'\n{test_script}\nENDSCRIPT\nchmod +x /tmp/mpi_continuous_test.sh"
+    result = ssh_exec(cmd)
+
+    if result.returncode != 0:
+        print_error(f"Failed to create script: {result.stderr}")
+        return 1
+
+    print_info("Starting continuous test in background...")
+    cmd = "nohup /tmp/mpi_continuous_test.sh > /tmp/mpi_test_output.log 2>&1 & echo $!"
+    result = ssh_exec(cmd)
+
+    if result.returncode == 0:
+        pid = result.stdout.strip()
+
+        # Save status locally
+        start_time = datetime.now()
+        with open(STATUS_FILE, 'w') as f:
+            f.write(f"{start_time.isoformat()}\n")
+            f.write(f"{pid}\n")
+            f.write(f"continuous\n")
+
+        print()
+        print_success("Continuous MPI tests started!")
+        print()
+        print(f"  {GREEN}PID: {pid}{NC}")
+        print(f"  Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print()
+        print_info("Monitor:")
+        print(f"  • Status: ./mpi_test_controller.py status")
+        print(f"  • Results: ssh versa@{MASTER_IP} 'tail -f /tmp/mpi_continuous_results.log'")
+        print(f"  • Grafana: http://{MASTER_IP}:3000")
+        print()
+        print_info("Stop:")
+        print(f"  • ./mpi_test_controller.py stop")
+
+        return 0
+    else:
+        print_error(f"Failed to start: {result.stderr}")
+        return 1
+
+def stop_tests():
+    """Stop all MPI tests"""
+    print_header("STOPPING MPI TESTS")
+    print()
+
+    print_info("Killing MPI processes on master...")
+
+    # Kill the continuous script and any mpirun processes
+    cmd = """
+pkill -f mpi_continuous_test.sh 2>/dev/null
+pkill -f osu_allreduce 2>/dev/null
+pkill -f osu_bcast 2>/dev/null
+pkill -f osu_reduce 2>/dev/null
+pkill -f osu_allgather 2>/dev/null
+pkill -9 -f "mpirun.*hostfile_rdma" 2>/dev/null
+echo "Stopped"
+"""
+    result = ssh_exec(cmd)
+
+    # Also kill on all other nodes
+    print_info("Cleaning up all nodes...")
+    nodes = ["192.168.11.153", "192.168.11.154", "192.168.11.155",
+             "192.168.11.107", "192.168.12.51", "192.168.20.150", "192.168.30.94"]
+
+    for ip in nodes:
+        try:
+            ssh_cmd = [
+                'sshpass', '-p', PASSWORD,
+                'ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=5',
+                f'versa@{ip}',
+                'pkill -9 -f osu_ 2>/dev/null; echo done'
+            ]
+            subprocess.run(ssh_cmd, capture_output=True, timeout=10)
+        except:
+            pass
+
+    # Remove status file
+    if os.path.exists(STATUS_FILE):
+        os.remove(STATUS_FILE)
+
+    print_success("All MPI tests stopped")
+    return 0
+
+def check_status():
+    """Check if MPI tests are running"""
+
+    if not os.path.exists(STATUS_FILE):
+        print_error("No active MPI test session")
+        return False
+
+    try:
+        with open(STATUS_FILE, 'r') as f:
+            lines = f.readlines()
+            start_time = datetime.fromisoformat(lines[0].strip())
+            pid = lines[1].strip()
+            mode = lines[2].strip() if len(lines) > 2 else "unknown"
+
+        # Check if process is still running
+        cmd = f"ps -p {pid} -o pid= 2>/dev/null | wc -l"
+        result = ssh_exec(cmd)
+
+        is_running = result.stdout.strip() == "1"
+
+        elapsed = datetime.now() - start_time
+
+        print_header("MPI TEST STATUS")
+        print()
+        if is_running:
+            print(f"  Status: {GREEN}RUNNING{NC}")
+        else:
+            print(f"  Status: {RED}STOPPED{NC}")
+        print(f"  Mode: {mode}")
+        print(f"  PID: {pid}")
+        print(f"  Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  Elapsed: {str(elapsed).split('.')[0]}")
+        print()
+
+        if is_running:
+            # Get latest results
+            print_info("Latest results:")
+            cmd = "tail -10 /tmp/mpi_continuous_results.log 2>/dev/null"
+            result = ssh_exec(cmd)
+            if result.stdout.strip():
+                for line in result.stdout.strip().split('\n')[-5:]:
+                    print(f"  {line}")
+
+        return is_running
+
+    except Exception as e:
+        print_error(f"Error reading status: {e}")
+        return False
+
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} [start|stop|status|once]")
+        print()
+        print("MPI Test Controller - Continuous MPI/AI Training Traffic")
+        print()
+        print("Commands:")
+        print("  start  - Start continuous MPI collective tests (Allreduce, etc.)")
+        print("  stop   - Stop all MPI tests")
+        print("  status - Check test status and latest results")
+        print("  once   - Run benchmarks once and display results")
+        print()
+        return 1
+
+    command = sys.argv[1].lower()
+
+    if command == "start":
+        return start_continuous_test()
+    elif command == "stop":
+        return stop_tests()
+    elif command == "status":
+        check_status()
+        return 0
+    elif command == "once":
+        run_benchmark_once()
+        return 0
+    else:
+        print_error(f"Unknown command: {command}")
+        return 1
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print()
+        print_info("Interrupted")
+        sys.exit(1)
