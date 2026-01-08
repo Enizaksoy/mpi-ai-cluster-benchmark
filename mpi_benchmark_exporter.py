@@ -25,9 +25,13 @@ NUM_PROCESSES = 8
 metrics = {
     "allreduce_4mb": 0.0,
     "allreduce_1mb": 0.0,
+    "allreduce_64kb": 0.0,
+    "allreduce_1kb": 0.0,
     "broadcast_4mb": 0.0,
+    "broadcast_1mb": 0.0,
     "alltoall_1mb": 0.0,
-    "allgather_2mb": 0.0,
+    "allgather_128kb": 0.0,
+    "reduce_1mb": 0.0,
     "last_update": 0,
     "stress_test_running": 0,
     "iteration": 0,
@@ -55,32 +59,53 @@ def parse_log_file():
     if iteration_matches:
         results['iteration'] = int(iteration_matches[-1])
 
-    # Get last 2000 chars (most recent results)
-    recent = content[-2000:] if len(content) > 2000 else content
+    # Get last 5000 chars (most recent results - covers full iteration)
+    recent = content[-5000:] if len(content) > 5000 else content
 
     # Parse OSU benchmark output format: "size    latency"
     # OSU output has headers, then: 4194304    12345.67
     # Use regex that skips headers
 
-    # Allreduce 4MB (size 4194304)
-    allreduce_match = re.search(r'Allreduce 4MB.*?4194304\s+([\d.]+)', recent, re.DOTALL)
-    if allreduce_match:
-        results['allreduce_4mb'] = float(allreduce_match.group(1))
+    # Allreduce - multiple sizes
+    allreduce_4mb = re.search(r'Allreduce 4MB.*?4194304\s+([\d.]+)', recent, re.DOTALL)
+    if allreduce_4mb:
+        results['allreduce_4mb'] = float(allreduce_4mb.group(1))
 
-    # Alltoall 1MB (size 1048576)
+    allreduce_1mb = re.search(r'Allreduce 1MB.*?1048576\s+([\d.]+)', recent, re.DOTALL)
+    if allreduce_1mb:
+        results['allreduce_1mb'] = float(allreduce_1mb.group(1))
+
+    allreduce_64kb = re.search(r'Allreduce 64KB.*?65536\s+([\d.]+)', recent, re.DOTALL)
+    if allreduce_64kb:
+        results['allreduce_64kb'] = float(allreduce_64kb.group(1))
+
+    allreduce_1kb = re.search(r'Allreduce 1KB.*?1024\s+([\d.]+)', recent, re.DOTALL)
+    if allreduce_1kb:
+        results['allreduce_1kb'] = float(allreduce_1kb.group(1))
+
+    # Broadcast - multiple sizes
+    broadcast_4mb = re.search(r'Broadcast 4MB.*?4194304\s+([\d.]+)', recent, re.DOTALL)
+    if broadcast_4mb:
+        results['broadcast_4mb'] = float(broadcast_4mb.group(1))
+
+    broadcast_1mb = re.search(r'Broadcast 1MB.*?1048576\s+([\d.]+)', recent, re.DOTALL)
+    if broadcast_1mb:
+        results['broadcast_1mb'] = float(broadcast_1mb.group(1))
+
+    # Alltoall 1MB
     alltoall_match = re.search(r'Alltoall 1MB.*?1048576\s+([\d.]+)', recent, re.DOTALL)
     if alltoall_match:
         results['alltoall_1mb'] = float(alltoall_match.group(1))
 
-    # Broadcast 4MB (size 4194304)
-    broadcast_match = re.search(r'Broadcast 4MB.*?4194304\s+([\d.]+)', recent, re.DOTALL)
-    if broadcast_match:
-        results['broadcast_4mb'] = float(broadcast_match.group(1))
-
-    # Allgather 2MB (size 2097152)
-    allgather_match = re.search(r'Allgather 2MB.*?2097152\s+([\d.]+)', recent, re.DOTALL)
+    # Allgather 128KB
+    allgather_match = re.search(r'Allgather 128KB.*?131072\s+([\d.]+)', recent, re.DOTALL)
     if allgather_match:
-        results['allgather_2mb'] = float(allgather_match.group(1))
+        results['allgather_128kb'] = float(allgather_match.group(1))
+
+    # Reduce 1MB
+    reduce_match = re.search(r'Reduce 1MB.*?1048576\s+([\d.]+)', recent, re.DOTALL)
+    if reduce_match:
+        results['reduce_1mb'] = float(reduce_match.group(1))
 
     return results
 
@@ -117,7 +142,9 @@ def update_metrics():
         else:
             if not running:
                 # Stress test stopped - zero out metrics
-                for key in ["allreduce_4mb", "allreduce_1mb", "broadcast_4mb", "alltoall_1mb", "allgather_2mb"]:
+                for key in ["allreduce_4mb", "allreduce_1mb", "allreduce_64kb", "allreduce_1kb",
+                            "broadcast_4mb", "broadcast_1mb", "alltoall_1mb",
+                            "allgather_128kb", "reduce_1mb"]:
                     metrics[key] = 0.0
                 print(f"[{datetime.now()}] Stress test not running - metrics zeroed")
 
@@ -141,11 +168,15 @@ def generate_metrics():
         lines.append("# HELP mpi_allreduce_latency_us MPI Allreduce latency in microseconds")
         lines.append("# TYPE mpi_allreduce_latency_us gauge")
         lines.append(f'mpi_allreduce_latency_us{{size="4MB",nodes="{NUM_PROCESSES}"}} {metrics["allreduce_4mb"]}')
+        lines.append(f'mpi_allreduce_latency_us{{size="1MB",nodes="{NUM_PROCESSES}"}} {metrics["allreduce_1mb"]}')
+        lines.append(f'mpi_allreduce_latency_us{{size="64KB",nodes="{NUM_PROCESSES}"}} {metrics["allreduce_64kb"]}')
+        lines.append(f'mpi_allreduce_latency_us{{size="1KB",nodes="{NUM_PROCESSES}"}} {metrics["allreduce_1kb"]}')
 
         lines.append("")
         lines.append("# HELP mpi_broadcast_latency_us MPI Broadcast latency in microseconds")
         lines.append("# TYPE mpi_broadcast_latency_us gauge")
         lines.append(f'mpi_broadcast_latency_us{{size="4MB",nodes="{NUM_PROCESSES}"}} {metrics["broadcast_4mb"]}')
+        lines.append(f'mpi_broadcast_latency_us{{size="1MB",nodes="{NUM_PROCESSES}"}} {metrics["broadcast_1mb"]}')
 
         lines.append("")
         lines.append("# HELP mpi_alltoall_latency_us MPI Alltoall latency in microseconds")
@@ -155,7 +186,12 @@ def generate_metrics():
         lines.append("")
         lines.append("# HELP mpi_allgather_latency_us MPI Allgather latency in microseconds")
         lines.append("# TYPE mpi_allgather_latency_us gauge")
-        lines.append(f'mpi_allgather_latency_us{{size="2MB",nodes="{NUM_PROCESSES}"}} {metrics["allgather_2mb"]}')
+        lines.append(f'mpi_allgather_latency_us{{size="128KB",nodes="{NUM_PROCESSES}"}} {metrics["allgather_128kb"]}')
+
+        lines.append("")
+        lines.append("# HELP mpi_reduce_latency_us MPI Reduce latency in microseconds")
+        lines.append("# TYPE mpi_reduce_latency_us gauge")
+        lines.append(f'mpi_reduce_latency_us{{size="1MB",nodes="{NUM_PROCESSES}"}} {metrics["reduce_1mb"]}')
 
         lines.append("")
         lines.append("# HELP mpi_benchmark_last_update_timestamp Unix timestamp of last log update")

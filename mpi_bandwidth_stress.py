@@ -25,6 +25,7 @@ HOSTFILE = "/home/versa/hostfile_rdma"
 # MPI stress test script that runs on the master
 MPI_STRESS_SCRIPT = '''#!/bin/bash
 # MPI Bandwidth Stress Test - Runs continuously until stopped
+# Tests multiple message sizes for comprehensive metrics
 
 HOSTFILE="/home/versa/hostfile_rdma"
 OSU_PATH="/usr/local/libexec/osu-micro-benchmarks/mpi/collective"
@@ -44,37 +45,73 @@ while true; do
     echo "" >> $LOGFILE
     echo "=== Iteration $iteration - $(date) ===" >> $LOGFILE
 
-    # Large message Allreduce - simulates gradient synchronization
-    echo "Allreduce 4MB x1000..." >> $LOGFILE
+    # Allreduce - Multiple sizes (gradient synchronization)
+    echo "Allreduce 4MB x500..." >> $LOGFILE
     mpirun --hostfile $HOSTFILE -np 8 \
         -x UCX_TLS -x UCX_NET_DEVICES \
         --mca pml ucx --mca btl ^openib,tcp \
         --mca btl_openib_warn_no_device_params_found 0 \
-        $OSU_PATH/osu_allreduce -m 4194304:4194304 -i 1000 >> $LOGFILE 2>&1
+        $OSU_PATH/osu_allreduce -m 4194304:4194304 -i 500 >> $LOGFILE 2>&1
 
-    # Alltoall - heavy all-to-all communication
-    echo "Alltoall 1MB x500..." >> $LOGFILE
+    echo "Allreduce 1MB x500..." >> $LOGFILE
     mpirun --hostfile $HOSTFILE -np 8 \
         -x UCX_TLS -x UCX_NET_DEVICES \
         --mca pml ucx --mca btl ^openib,tcp \
         --mca btl_openib_warn_no_device_params_found 0 \
-        $OSU_PATH/osu_alltoall -m 1048576:1048576 -i 500 >> $LOGFILE 2>&1
+        $OSU_PATH/osu_allreduce -m 1048576:1048576 -i 500 >> $LOGFILE 2>&1
 
-    # Broadcast large data
-    echo "Broadcast 4MB x1000..." >> $LOGFILE
+    echo "Allreduce 64KB x500..." >> $LOGFILE
     mpirun --hostfile $HOSTFILE -np 8 \
         -x UCX_TLS -x UCX_NET_DEVICES \
         --mca pml ucx --mca btl ^openib,tcp \
         --mca btl_openib_warn_no_device_params_found 0 \
-        $OSU_PATH/osu_bcast -m 4194304:4194304 -i 1000 >> $LOGFILE 2>&1
+        $OSU_PATH/osu_allreduce -m 65536:65536 -i 500 >> $LOGFILE 2>&1
 
-    # Allgather - gather from all nodes
-    echo "Allgather 2MB x500..." >> $LOGFILE
+    echo "Allreduce 1KB x500..." >> $LOGFILE
     mpirun --hostfile $HOSTFILE -np 8 \
         -x UCX_TLS -x UCX_NET_DEVICES \
         --mca pml ucx --mca btl ^openib,tcp \
         --mca btl_openib_warn_no_device_params_found 0 \
-        $OSU_PATH/osu_allgather -m 2097152:2097152 -i 500 >> $LOGFILE 2>&1
+        $OSU_PATH/osu_allreduce -m 1024:1024 -i 500 >> $LOGFILE 2>&1
+
+    # Broadcast - Multiple sizes
+    echo "Broadcast 4MB x500..." >> $LOGFILE
+    mpirun --hostfile $HOSTFILE -np 8 \
+        -x UCX_TLS -x UCX_NET_DEVICES \
+        --mca pml ucx --mca btl ^openib,tcp \
+        --mca btl_openib_warn_no_device_params_found 0 \
+        $OSU_PATH/osu_bcast -m 4194304:4194304 -i 500 >> $LOGFILE 2>&1
+
+    echo "Broadcast 1MB x500..." >> $LOGFILE
+    mpirun --hostfile $HOSTFILE -np 8 \
+        -x UCX_TLS -x UCX_NET_DEVICES \
+        --mca pml ucx --mca btl ^openib,tcp \
+        --mca btl_openib_warn_no_device_params_found 0 \
+        $OSU_PATH/osu_bcast -m 1048576:1048576 -i 500 >> $LOGFILE 2>&1
+
+    # Alltoall 1MB - heavy all-to-all communication
+    echo "Alltoall 1MB x300..." >> $LOGFILE
+    mpirun --hostfile $HOSTFILE -np 8 \
+        -x UCX_TLS -x UCX_NET_DEVICES \
+        --mca pml ucx --mca btl ^openib,tcp \
+        --mca btl_openib_warn_no_device_params_found 0 \
+        $OSU_PATH/osu_alltoall -m 1048576:1048576 -i 300 >> $LOGFILE 2>&1
+
+    # Allgather 128KB
+    echo "Allgather 128KB x500..." >> $LOGFILE
+    mpirun --hostfile $HOSTFILE -np 8 \
+        -x UCX_TLS -x UCX_NET_DEVICES \
+        --mca pml ucx --mca btl ^openib,tcp \
+        --mca btl_openib_warn_no_device_params_found 0 \
+        $OSU_PATH/osu_allgather -m 131072:131072 -i 500 >> $LOGFILE 2>&1
+
+    # Reduce 1MB
+    echo "Reduce 1MB x500..." >> $LOGFILE
+    mpirun --hostfile $HOSTFILE -np 8 \
+        -x UCX_TLS -x UCX_NET_DEVICES \
+        --mca pml ucx --mca btl ^openib,tcp \
+        --mca btl_openib_warn_no_device_params_found 0 \
+        $OSU_PATH/osu_reduce -m 1048576:1048576 -i 500 >> $LOGFILE 2>&1
 
     echo "Iteration $iteration complete" >> $LOGFILE
 
