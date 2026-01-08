@@ -122,26 +122,25 @@ curl http://YOUR_MASTER_IP:9105/metrics
             ▼                    ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    Master Node (Server 1)                    │
-│  ┌─────────────────┐  ┌─────────────────┐                   │
-│  │ mpi_benchmark_  │  │ Prometheus      │                   │
-│  │ exporter.py     │  │ :9090           │                   │
-│  │ :9105           │  └────────┬────────┘                   │
-│  └────────┬────────┘           │                            │
-│           │ mpirun             │                            │
-│           ▼                    ▼                            │
-│  ┌─────────────────────────────────────────────┐            │
-│  │              MPI Cluster (8 nodes)           │            │
-│  │  ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐           │            │
-│  │  │Node1│ │Node2│ │Node3│ │Node4│  ...      │            │
-│  │  └──┬──┘ └──┬──┘ └──┬──┘ └──┬──┘           │            │
-│  │     │       │       │       │               │            │
-│  │     └───────┴───────┴───────┘               │            │
-│  │              RDMA Fabric                     │            │
-│  │         (RoCEv2 + PFC + ECN)                │            │
-│  └─────────────────────────────────────────────┘            │
-└─────────────────────────────────────────────────────────────┘
-            │
-            ▼
+│                                                              │
+│  mpi_stress_test.sh ──writes──> /tmp/mpi_stress.log         │
+│         │                              │                     │
+│         │ mpirun                       │ reads               │
+│         ▼                              ▼                     │
+│  ┌─────────────────┐         ┌─────────────────┐            │
+│  │  MPI Cluster    │         │ mpi_benchmark_  │            │
+│  │  (8 nodes)      │         │ exporter.py     │            │
+│  │  Running OSU    │         │ :9105           │            │
+│  │  benchmarks     │         │ (log reader)    │            │
+│  └─────────────────┘         └────────┬────────┘            │
+│                                       │                      │
+│                              ┌────────┴────────┐            │
+│                              │  Prometheus     │            │
+│                              │  :9090          │            │
+│                              └────────┬────────┘            │
+└───────────────────────────────────────┼─────────────────────┘
+                                        │
+                                        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                       Grafana                                │
 │  ┌─────────────────────────────────────────────┐            │
@@ -153,6 +152,8 @@ curl http://YOUR_MASTER_IP:9105/metrics
 │  └─────────────────────────────────────────────┘            │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Key Change:** The exporter no longer runs its own MPI benchmarks. It reads results from the stress test log file, so there's only ONE source of MPI traffic.
 
 ## Repository Structure
 
@@ -179,31 +180,28 @@ mpi-ai-cluster-benchmark/
 
 ## Prometheus Metrics
 
-The exporter exposes these metrics on port 9105:
+The exporter reads results from the stress test log (`/tmp/mpi_stress.log`) and exposes metrics on port 9105:
 
 ```prometheus
 # Allreduce latency (gradient synchronization)
-mpi_allreduce_latency_us{size="4MB",nodes="8"} 38943.86
-mpi_allreduce_latency_us{size="1MB",nodes="8"} 10600.0
-mpi_allreduce_latency_us{size="64KB",nodes="8"} 484.0
-mpi_allreduce_latency_us{size="1KB",nodes="8"} 64.9
+mpi_allreduce_latency_us{size="4MB",nodes="8"} 44977.66
 
 # Broadcast latency (model distribution)
-mpi_broadcast_latency_us{size="4MB",nodes="8"} 25426.83
-mpi_broadcast_latency_us{size="1MB",nodes="8"} 5870.0
+mpi_broadcast_latency_us{size="4MB",nodes="8"} 22456.69
 
 # Alltoall latency (MoE routing)
-mpi_alltoall_latency_us{size="1MB",nodes="8"} 73033.30
+mpi_alltoall_latency_us{size="1MB",nodes="8"} 123488.25
 
-# Other collectives
-mpi_allgather_latency_us{size="128KB",nodes="8"} 6300.0
-mpi_reduce_latency_us{size="1MB",nodes="8"} 5850.0
+# Allgather latency
+mpi_allgather_latency_us{size="2MB",nodes="8"} 127229.43
 
 # Exporter status
-mpi_benchmark_success 1
-mpi_benchmark_running 0
-mpi_benchmark_last_run_timestamp 1736286417
+mpi_stress_test_running 1
+mpi_stress_test_iteration 2
+mpi_benchmark_last_update_timestamp 1736286417
 ```
+
+**Note:** The exporter does NOT run its own benchmarks. It reads results from the stress test log file. Start the stress test first to see metrics in Grafana.
 
 ## Understanding the Results
 

@@ -1,127 +1,136 @@
 #!/usr/bin/env python3
 """
-MPI Benchmark Prometheus Exporter (No external dependencies!)
-Runs OSU MPI benchmarks periodically and exposes results for Prometheus/Grafana
+MPI Benchmark Prometheus Exporter - Log Reader Version
+Reads results from stress test log instead of running own benchmarks
 
 Port: 9105
 Run on: Master server (192.168.11.152)
 """
 
-import subprocess
+import re
 import time
 import threading
 import http.server
 import socketserver
 from datetime import datetime
+import os
 
 # Configuration
-HOSTFILE = "/home/versa/hostfile_rdma"
-NUM_PROCESSES = 8
-OSU_PATH = "/usr/local/libexec/osu-micro-benchmarks/mpi/collective"
-BENCHMARK_INTERVAL = 60  # Run benchmarks every 60 seconds
+LOGFILE = "/tmp/mpi_stress.log"
+LOG_CHECK_INTERVAL = 5  # Check log every 5 seconds
 PORT = 9105
+NUM_PROCESSES = 8
 
 # Current metrics storage
 metrics = {
     "allreduce_4mb": 0.0,
     "allreduce_1mb": 0.0,
-    "allreduce_64kb": 0.0,
-    "allreduce_1kb": 0.0,
     "broadcast_4mb": 0.0,
-    "broadcast_1mb": 0.0,
     "alltoall_1mb": 0.0,
-    "allgather_128kb": 0.0,
-    "reduce_1mb": 0.0,
-    "last_run": 0,
-    "success": 0,
-    "running": 0,
+    "allgather_2mb": 0.0,
+    "last_update": 0,
+    "stress_test_running": 0,
+    "iteration": 0,
 }
 
 metrics_lock = threading.Lock()
 
-def run_mpi_command(benchmark, size, iterations=50):
-    """Run a single MPI benchmark and return latency in microseconds"""
+def parse_log_file():
+    """Parse the stress test log file for latest results"""
 
-    cmd = f"""
-export UCX_TLS=ud_verbs,self,sm
-export UCX_NET_DEVICES=all
-mpirun --hostfile {HOSTFILE} -np {NUM_PROCESSES} \
-    -x UCX_TLS -x UCX_NET_DEVICES \
-    --mca pml ucx --mca btl ^openib,tcp \
-    --mca btl_openib_warn_no_device_params_found 0 \
-    {OSU_PATH}/{benchmark} -m {size}:{size} -i {iterations} 2>&1 | grep -E "^{size}"
-"""
+    if not os.path.exists(LOGFILE):
+        return None
 
     try:
-        result = subprocess.run(
-            ['bash', '-c', cmd],
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-
-        if result.returncode == 0 and result.stdout.strip():
-            parts = result.stdout.strip().split()
-            if len(parts) >= 2:
-                latency = float(parts[1])
-                return latency
+        with open(LOGFILE, 'r') as f:
+            content = f.read()
     except Exception as e:
-        print(f"Error running {benchmark}: {e}")
+        print(f"Error reading log: {e}")
+        return None
 
-    return None
+    results = {}
 
-def run_benchmarks():
-    """Run all benchmarks and update metrics"""
+    # Find the latest iteration
+    iteration_matches = re.findall(r'=== Iteration (\d+)', content)
+    if iteration_matches:
+        results['iteration'] = int(iteration_matches[-1])
+
+    # Get last 2000 chars (most recent results)
+    recent = content[-2000:] if len(content) > 2000 else content
+
+    # Parse OSU benchmark output format: "size    latency"
+    # OSU output has headers, then: 4194304    12345.67
+    # Use regex that skips headers
+
+    # Allreduce 4MB (size 4194304)
+    allreduce_match = re.search(r'Allreduce 4MB.*?4194304\s+([\d.]+)', recent, re.DOTALL)
+    if allreduce_match:
+        results['allreduce_4mb'] = float(allreduce_match.group(1))
+
+    # Alltoall 1MB (size 1048576)
+    alltoall_match = re.search(r'Alltoall 1MB.*?1048576\s+([\d.]+)', recent, re.DOTALL)
+    if alltoall_match:
+        results['alltoall_1mb'] = float(alltoall_match.group(1))
+
+    # Broadcast 4MB (size 4194304)
+    broadcast_match = re.search(r'Broadcast 4MB.*?4194304\s+([\d.]+)', recent, re.DOTALL)
+    if broadcast_match:
+        results['broadcast_4mb'] = float(broadcast_match.group(1))
+
+    # Allgather 2MB (size 2097152)
+    allgather_match = re.search(r'Allgather 2MB.*?2097152\s+([\d.]+)', recent, re.DOTALL)
+    if allgather_match:
+        results['allgather_2mb'] = float(allgather_match.group(1))
+
+    return results
+
+def check_stress_test_running():
+    """Check if stress test is currently running"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['pgrep', '-f', 'mpi_stress_test.sh'],
+            capture_output=True,
+            timeout=5
+        )
+        return result.returncode == 0
+    except:
+        return False
+
+def update_metrics():
+    """Update metrics from log file"""
 
     global metrics
 
-    print(f"[{datetime.now()}] Running MPI benchmarks...")
+    results = parse_log_file()
+    running = check_stress_test_running()
 
     with metrics_lock:
-        metrics["running"] = 1
+        metrics["stress_test_running"] = 1 if running else 0
 
-    success = True
-    results = {}
-
-    benchmarks = [
-        ("osu_allreduce", "4194304", "allreduce_4mb"),
-        ("osu_allreduce", "1048576", "allreduce_1mb"),
-        ("osu_allreduce", "65536", "allreduce_64kb"),
-        ("osu_allreduce", "1024", "allreduce_1kb"),
-        ("osu_bcast", "4194304", "broadcast_4mb"),
-        ("osu_bcast", "1048576", "broadcast_1mb"),
-        ("osu_alltoall", "1048576", "alltoall_1mb"),
-        ("osu_allgather", "131072", "allgather_128kb"),
-        ("osu_reduce", "1048576", "reduce_1mb"),
-    ]
-
-    for bench_name, size, metric_key in benchmarks:
-        latency = run_mpi_command(bench_name, size)
-        if latency is not None:
-            results[metric_key] = latency
-            print(f"  {metric_key}: {latency:.2f} us")
+        if results:
+            for key, value in results.items():
+                if key in metrics:
+                    metrics[key] = value
+            metrics["last_update"] = time.time()
+            print(f"[{datetime.now()}] Updated metrics from log - iteration {results.get('iteration', '?')}")
         else:
-            success = False
-            print(f"  {metric_key}: FAILED")
+            if not running:
+                # Stress test stopped - zero out metrics
+                for key in ["allreduce_4mb", "allreduce_1mb", "broadcast_4mb", "alltoall_1mb", "allgather_2mb"]:
+                    metrics[key] = 0.0
+                print(f"[{datetime.now()}] Stress test not running - metrics zeroed")
 
-    with metrics_lock:
-        for key, value in results.items():
-            metrics[key] = value
-        metrics["last_run"] = time.time()
-        metrics["success"] = 1 if success else 0
-        metrics["running"] = 0
-
-    print(f"[{datetime.now()}] Benchmarks complete. Success={success}")
-
-def benchmark_loop():
-    """Continuously run benchmarks"""
+def log_monitor_loop():
+    """Continuously monitor the log file"""
+    print(f"[{datetime.now()}] Log monitor started - watching {LOGFILE}")
     while True:
         try:
-            run_benchmarks()
+            update_metrics()
         except Exception as e:
-            print(f"Error in benchmark loop: {e}")
+            print(f"Error in log monitor: {e}")
 
-        time.sleep(BENCHMARK_INTERVAL)
+        time.sleep(LOG_CHECK_INTERVAL)
 
 def generate_metrics():
     """Generate Prometheus format metrics"""
@@ -132,15 +141,11 @@ def generate_metrics():
         lines.append("# HELP mpi_allreduce_latency_us MPI Allreduce latency in microseconds")
         lines.append("# TYPE mpi_allreduce_latency_us gauge")
         lines.append(f'mpi_allreduce_latency_us{{size="4MB",nodes="{NUM_PROCESSES}"}} {metrics["allreduce_4mb"]}')
-        lines.append(f'mpi_allreduce_latency_us{{size="1MB",nodes="{NUM_PROCESSES}"}} {metrics["allreduce_1mb"]}')
-        lines.append(f'mpi_allreduce_latency_us{{size="64KB",nodes="{NUM_PROCESSES}"}} {metrics["allreduce_64kb"]}')
-        lines.append(f'mpi_allreduce_latency_us{{size="1KB",nodes="{NUM_PROCESSES}"}} {metrics["allreduce_1kb"]}')
 
         lines.append("")
         lines.append("# HELP mpi_broadcast_latency_us MPI Broadcast latency in microseconds")
         lines.append("# TYPE mpi_broadcast_latency_us gauge")
         lines.append(f'mpi_broadcast_latency_us{{size="4MB",nodes="{NUM_PROCESSES}"}} {metrics["broadcast_4mb"]}')
-        lines.append(f'mpi_broadcast_latency_us{{size="1MB",nodes="{NUM_PROCESSES}"}} {metrics["broadcast_1mb"]}')
 
         lines.append("")
         lines.append("# HELP mpi_alltoall_latency_us MPI Alltoall latency in microseconds")
@@ -150,27 +155,22 @@ def generate_metrics():
         lines.append("")
         lines.append("# HELP mpi_allgather_latency_us MPI Allgather latency in microseconds")
         lines.append("# TYPE mpi_allgather_latency_us gauge")
-        lines.append(f'mpi_allgather_latency_us{{size="128KB",nodes="{NUM_PROCESSES}"}} {metrics["allgather_128kb"]}')
+        lines.append(f'mpi_allgather_latency_us{{size="2MB",nodes="{NUM_PROCESSES}"}} {metrics["allgather_2mb"]}')
 
         lines.append("")
-        lines.append("# HELP mpi_reduce_latency_us MPI Reduce latency in microseconds")
-        lines.append("# TYPE mpi_reduce_latency_us gauge")
-        lines.append(f'mpi_reduce_latency_us{{size="1MB",nodes="{NUM_PROCESSES}"}} {metrics["reduce_1mb"]}')
+        lines.append("# HELP mpi_benchmark_last_update_timestamp Unix timestamp of last log update")
+        lines.append("# TYPE mpi_benchmark_last_update_timestamp gauge")
+        lines.append(f"mpi_benchmark_last_update_timestamp {metrics['last_update']}")
 
         lines.append("")
-        lines.append("# HELP mpi_benchmark_last_run_timestamp Unix timestamp of last benchmark run")
-        lines.append("# TYPE mpi_benchmark_last_run_timestamp gauge")
-        lines.append(f"mpi_benchmark_last_run_timestamp {metrics['last_run']}")
+        lines.append("# HELP mpi_stress_test_running Whether stress test is currently running")
+        lines.append("# TYPE mpi_stress_test_running gauge")
+        lines.append(f"mpi_stress_test_running {metrics['stress_test_running']}")
 
         lines.append("")
-        lines.append("# HELP mpi_benchmark_success Whether last benchmark was successful")
-        lines.append("# TYPE mpi_benchmark_success gauge")
-        lines.append(f"mpi_benchmark_success {metrics['success']}")
-
-        lines.append("")
-        lines.append("# HELP mpi_benchmark_running Whether benchmark is currently running")
-        lines.append("# TYPE mpi_benchmark_running gauge")
-        lines.append(f"mpi_benchmark_running {metrics['running']}")
+        lines.append("# HELP mpi_stress_test_iteration Current stress test iteration")
+        lines.append("# TYPE mpi_stress_test_iteration counter")
+        lines.append(f"mpi_stress_test_iteration {metrics['iteration']}")
 
         return '\n'.join(lines) + '\n'
 
@@ -196,10 +196,17 @@ class MetricsHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(b'OK')
 
         elif self.path == '/':
-            html = """<html>
+            with metrics_lock:
+                running = metrics['stress_test_running']
+                iteration = metrics['iteration']
+
+            status = "RUNNING" if running else "STOPPED"
+            html = f"""<html>
 <head><title>MPI Benchmark Exporter</title></head>
 <body>
-<h1>MPI Benchmark Exporter</h1>
+<h1>MPI Benchmark Exporter (Log Reader)</h1>
+<p>Stress Test: <b>{status}</b> (Iteration: {iteration})</p>
+<p>Reads from: {LOGFILE}</p>
 <p><a href="/metrics">Metrics</a></p>
 <p><a href="/health">Health</a></p>
 </body>
@@ -218,15 +225,21 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
 
 def main():
-    print(f"MPI Benchmark Exporter")
+    print(f"MPI Benchmark Exporter (Log Reader Version)")
+    print(f"=" * 50)
     print(f"Port: {PORT}")
-    print(f"Benchmark interval: {BENCHMARK_INTERVAL} seconds")
+    print(f"Log file: {LOGFILE}")
+    print(f"Check interval: {LOG_CHECK_INTERVAL} seconds")
     print(f"Metrics: http://0.0.0.0:{PORT}/metrics")
     print()
+    print("This exporter reads from the stress test log.")
+    print("It does NOT run its own benchmarks.")
+    print("Start stress test with: ./mpi_bandwidth_stress.py start")
+    print()
 
-    # Start benchmark thread
-    benchmark_thread = threading.Thread(target=benchmark_loop, daemon=True)
-    benchmark_thread.start()
+    # Start log monitor thread
+    monitor_thread = threading.Thread(target=log_monitor_loop, daemon=True)
+    monitor_thread.start()
 
     # Start HTTP server
     server = ThreadedHTTPServer(('0.0.0.0', PORT), MetricsHandler)
